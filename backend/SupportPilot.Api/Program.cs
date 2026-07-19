@@ -47,18 +47,19 @@ const string DocsCollection = "supportpilot_docs";
 // "generation is a swappable adapter" idea.
 const string GenerationModel = "llama3.2:3b";
 
-// The SYSTEM prompt sets the assistant's role and rules. It is NOT the user's
-// question — it frames how the model should behave for every message.
-const string SystemPrompt =
-    "You are SupportPilot, a friendly and concise customer-support assistant. " +
-    "Answer professionally. If you are unsure, say so rather than guessing.";
+// The base persona. Day 4 assembles the FULL system prompt per request inside
+// /chat by appending the retrieved context and the grounding rules (RAG loop).
+const string Persona =
+    "You are SupportPilot, a friendly and concise customer-support assistant.";
 
 app.MapGet("/", () => "SupportPilot API is running. Try: GET /chat?q=your+question");
 
-// DAY 1: stream the model's answer back token-by-token using Server-Sent Events (SSE).
-// Ollama streams its own answer as NDJSON (one JSON object per line); we read those
-// lines, pull out the incremental text, and relay each piece to the browser as SSE.
-app.MapGet("/chat", async (string? q, HttpResponse response, IHttpClientFactory httpFactory, CancellationToken ct) =>
+// DAY 4 — THE RAG LOOP. The real assistant. Instead of asking the model blind
+// (Day 1, which hallucinated because it has no company knowledge), we RETRIEVE
+// relevant chunks from the ingested docs, GROUND the model in them, stream the
+// answer token-by-token (SSE), and finish with CITATIONS.
+app.MapGet("/chat", async (string? q, int? k, HttpResponse response,
+    EmbeddingClient embedder, VectorStore store, IHttpClientFactory httpFactory, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(q))
     {
@@ -70,63 +71,44 @@ app.MapGet("/chat", async (string? q, HttpResponse response, IHttpClientFactory 
     response.Headers.ContentType = "text/event-stream";
     response.Headers.CacheControl = "no-cache";
 
-    // Build the request body for Ollama's native chat API. stream:true makes
-    // Ollama emit the answer incrementally instead of all at once.
-    var payload = new OllamaChatRequest(
-        Model: GenerationModel,
-        Stream: true,
-        Messages:
-        [
-            new OllamaMessage("system", SystemPrompt),
-            new OllamaMessage("user", q),
-        ]);
+    // 1. RETRIEVE — embed the question, pull the top-K chunks from the docs
+    //    ingested on Day 3. EnsureCollection avoids a 404 if nothing's ingested yet.
+    await store.EnsureCollectionAsync(DocsCollection, EmbeddingClient.Dimensions, ct);
+    var queryVector = await embedder.EmbedAsync(q, ct);
+    var hits = await store.SearchAsync(DocsCollection, queryVector, limit: k ?? 5, ct);
 
-    var http = httpFactory.CreateClient("ollama");
-    using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+    // 2. GROUND — assemble a context block the model must answer from. Numbering
+    //    each chunk lets the model cite it as [1], [2], ...
+    var context = new StringBuilder();
+    for (var i = 0; i < hits.Count; i++)
+        context.AppendLine($"[{i + 1}] (source: {hits[i].Filename} p.{hits[i].Page})\n{hits[i].Text}\n");
+
+    // The grounding rules are the heart of RAG: answer ONLY from context, admit
+    // ignorance otherwise (no hallucinating), and cite sources.
+    var systemPrompt =
+        Persona + " Answer the user's question using ONLY the context below. " +
+        "If the answer is not in the context, reply exactly: " +
+        "\"I don't know based on the available documents.\" Do not use any outside knowledge. " +
+        "When you state a fact, cite the source number it came from, like [1].\n\n" +
+        "Context:\n" +
+        (hits.Count > 0 ? context.ToString() : "(no documents were retrieved)");
+
+    // 3. GENERATE — stream the grounded answer token-by-token.
+    OllamaMessage[] messages = [new("system", systemPrompt), new("user", q)];
+    await StreamOllamaAnswer(messages, GenerationModel, response, httpFactory, ct);
+
+    // 4. CITATIONS — after the answer, emit the sources as one structured event
+    //    (sentinel-prefixed, same style as [DONE]) so the Day-5 frontend can render
+    //    clickable citations.
+    if (hits.Count > 0)
     {
-        Content = new StringContent(
-            JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
-    };
-
-    try
-    {
-        // ResponseHeadersRead = start reading as soon as headers arrive, instead
-        // of buffering the whole (streamed) body first. Essential for streaming.
-        using var ollamaResponse = await http.SendAsync(
-            request, HttpCompletionOption.ResponseHeadersRead, ct);
-
-        if (!ollamaResponse.IsSuccessStatusCode)
+        var citations = hits.Select((h, i) => new
         {
-            var body = await ollamaResponse.Content.ReadAsStringAsync(ct);
-            await WriteEvent(response, $"[error] Ollama returned {(int)ollamaResponse.StatusCode}: {body}", ct);
-            return;
-        }
-
-        await using var stream = await ollamaResponse.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream);
-
-        // Read the NDJSON stream line by line. Each line is a JSON object like:
-        //   {"message":{"role":"assistant","content":"Hello"},"done":false}
-        // We forward message.content and stop when "done" is true.
-        while (await reader.ReadLineAsync(ct) is { } line)
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            var chunk = JsonSerializer.Deserialize<OllamaChatChunk>(line);
-            var text = chunk?.Message?.Content;
-            if (!string.IsNullOrEmpty(text))
-            {
-                await WriteEvent(response, text, ct);
-            }
-
-            if (chunk?.Done == true) break;
-        }
-    }
-    catch (HttpRequestException ex)
-    {
-        // Most common cause: the Ollama server isn't running. Surface it cleanly
-        // instead of crashing the request with an unhandled exception.
-        await WriteEvent(response, $"[error] Could not reach Ollama — is it running? ({ex.Message})", ct);
+            n = i + 1,
+            source = $"{h.Filename} (p.{h.Page})",
+            score = Math.Round(h.Score, 4),
+        });
+        await WriteEvent(response, "[CITATIONS]" + JsonSerializer.Serialize(citations), ct);
     }
 
     await WriteEvent(response, "[DONE]", ct);
@@ -264,6 +246,64 @@ static async Task WriteEvent(HttpResponse response, string text, CancellationTok
 {
     await response.WriteAsync($"data: {text}\n\n", ct);
     await response.Body.FlushAsync(ct);
+}
+
+// Stream one Ollama chat completion to the response as SSE token events. Shared
+// by the RAG /chat loop. It relays each token but does NOT emit [DONE] — the
+// caller owns the tail (so it can send citations first).
+static async Task StreamOllamaAnswer(
+    IReadOnlyList<OllamaMessage> messages, string model,
+    HttpResponse response, IHttpClientFactory httpFactory, CancellationToken ct)
+{
+    var payload = new OllamaChatRequest(Model: model, Stream: true, Messages: messages);
+
+    var http = httpFactory.CreateClient("ollama");
+    using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+    {
+        Content = new StringContent(
+            JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
+    };
+
+    try
+    {
+        // ResponseHeadersRead = start reading as soon as headers arrive, instead
+        // of buffering the whole (streamed) body first. Essential for streaming.
+        using var ollamaResponse = await http.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, ct);
+
+        if (!ollamaResponse.IsSuccessStatusCode)
+        {
+            var body = await ollamaResponse.Content.ReadAsStringAsync(ct);
+            await WriteEvent(response, $"[error] Ollama returned {(int)ollamaResponse.StatusCode}: {body}", ct);
+            return;
+        }
+
+        await using var stream = await ollamaResponse.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+
+        // Read the NDJSON stream line by line. Each line is a JSON object like:
+        //   {"message":{"role":"assistant","content":"Hello"},"done":false}
+        // We forward message.content and stop when "done" is true.
+        while (await reader.ReadLineAsync(ct) is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            var chunk = JsonSerializer.Deserialize<OllamaChatChunk>(line);
+            var text = chunk?.Message?.Content;
+            if (!string.IsNullOrEmpty(text))
+            {
+                await WriteEvent(response, text, ct);
+            }
+
+            if (chunk?.Done == true) break;
+        }
+    }
+    catch (HttpRequestException ex)
+    {
+        // Most common cause: the Ollama server isn't running. Surface it cleanly
+        // instead of crashing the request with an unhandled exception.
+        await WriteEvent(response, $"[error] Could not reach Ollama — is it running? ({ex.Message})", ct);
+    }
 }
 
 // --- Request/response shapes for Ollama's /api/chat (records go after top-level code). ---
