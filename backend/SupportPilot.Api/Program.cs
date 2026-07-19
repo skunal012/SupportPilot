@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SupportPilot.Api.Rag;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,7 +17,22 @@ builder.Services.AddHttpClient("ollama", client =>
     client.Timeout = Timeout.InfiniteTimeSpan; // a streaming response stays open a while
 });
 
+// DAY 2: Qdrant is the vector database (runs in Docker on port 6333). We talk to
+// it over plain REST so every request is visible, same as the Ollama client above.
+builder.Services.AddHttpClient("qdrant", client =>
+{
+    var baseUrl = builder.Configuration["Qdrant:BaseUrl"] ?? "http://localhost:6333";
+    client.BaseAddress = new Uri(baseUrl);
+});
+
+// The two Day-2 building blocks: turn text into vectors, and store/search them.
+builder.Services.AddSingleton<EmbeddingClient>();
+builder.Services.AddSingleton<VectorStore>();
+
 var app = builder.Build();
+
+// DAY 2 demo constants: the collection we store sample doc-vectors in.
+const string DemoCollection = "supportpilot_demo";
 
 // The local model that writes the answer. Llama 3.2 3B fits on the GPU (fast).
 // Swapping models later is a one-line change — that's the whole point of the
@@ -106,6 +122,53 @@ app.MapGet("/chat", async (string? q, HttpResponse response, IHttpClientFactory 
     }
 
     await WriteEvent(response, "[DONE]", ct);
+});
+
+// DAY 2 — SEED: embed a handful of sample support sentences and store them in
+// Qdrant. In a real app these would be chunks of your uploaded docs (Day 3);
+// here they're hard-coded so we can see semantic search working end-to-end.
+app.MapPost("/demo/seed", async (EmbeddingClient embedder, VectorStore store, CancellationToken ct) =>
+{
+    string[] sentences =
+    [
+        "Our refund policy allows returns within 30 days of purchase.",
+        "Items must be unused and in their original packaging to qualify for a refund.",
+        "Standard shipping takes 3 to 5 business days within the country.",
+        "International shipping can take up to 14 business days to arrive.",
+        "You can reset your password from the account settings page.",
+        "Contact our support team at help@example.com for account problems.",
+        "Premium members receive free next-day delivery on every order.",
+        "Gift cards are non-refundable and cannot be exchanged for cash.",
+    ];
+
+    await store.EnsureCollectionAsync(DemoCollection, EmbeddingClient.Dimensions, ct);
+
+    var points = new List<VectorPoint>();
+    for (var i = 0; i < sentences.Length; i++)
+    {
+        var vector = await embedder.EmbedAsync(sentences[i], ct);
+        points.Add(new VectorPoint(Id: i, Vector: vector, Text: sentences[i]));
+    }
+
+    await store.UpsertAsync(DemoCollection, points, ct);
+    return Results.Ok(new { seeded = points.Count, collection = DemoCollection });
+});
+
+// DAY 2 — SEARCH: embed the incoming question, then ask Qdrant for the closest
+// stored sentences by cosine similarity. This is the "retrieve" half of RAG.
+app.MapGet("/demo/search", async (string? q, int? k, EmbeddingClient embedder, VectorStore store, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(q))
+        return Results.BadRequest("Pass a query, e.g. /demo/search?q=can+I+get+my+money+back");
+
+    var queryVector = await embedder.EmbedAsync(q, ct);
+    var hits = await store.SearchAsync(DemoCollection, queryVector, limit: k ?? 3, ct);
+
+    return Results.Ok(new
+    {
+        query = q,
+        results = hits.Select(h => new { score = Math.Round(h.Score, 4), text = h.Text }),
+    });
 });
 
 app.Run();
