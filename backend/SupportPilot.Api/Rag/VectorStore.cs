@@ -6,13 +6,21 @@ using System.Text.Json.Serialization;
 namespace SupportPilot.Api.Rag;
 
 /// <summary>
-/// A point to store: a stable id, its embedding vector, and the original text
-/// (plus any metadata) we want back when it matches a search.
+/// A point to store: an id, its embedding vector, the original text, and the
+/// metadata we want back on a match (which file / page / chunk it came from).
+/// Id is an object so it can be an int (demo points) or a Guid (ingested chunks,
+/// serialized as a UUID) — both are valid Qdrant point ids.
 /// </summary>
-public record VectorPoint(int Id, float[] Vector, string Text);
+public record VectorPoint(
+    object Id,
+    float[] Vector,
+    string Text,
+    string Filename = "demo",
+    int Page = 0,
+    int ChunkIndex = 0);
 
-/// <summary>A search result: how close it matched (cosine score) and the text.</summary>
-public record SearchHit(float Score, string Text);
+/// <summary>A search result: cosine score, the text, and where it came from.</summary>
+public record SearchHit(float Score, string Text, string Filename, int Page);
 
 /// <summary>
 /// Thin wrapper over Qdrant's REST API. Qdrant is the vector database — it stores
@@ -40,7 +48,7 @@ public sealed class VectorStore(IHttpClientFactory httpFactory)
 
     /// <summary>
     /// Insert or update points. wait=true makes Qdrant confirm the write is
-    /// searchable before returning — handy so a seed-then-search demo is reliable.
+    /// searchable before returning — handy so a seed/ingest-then-search is reliable.
     /// </summary>
     public async Task UpsertAsync(string collection, IEnumerable<VectorPoint> points, CancellationToken ct = default)
     {
@@ -50,7 +58,13 @@ public sealed class VectorStore(IHttpClientFactory httpFactory)
             {
                 id = p.Id,
                 vector = p.Vector,
-                payload = new { text = p.Text },
+                payload = new
+                {
+                    text = p.Text,
+                    filename = p.Filename,
+                    page = p.Page,
+                    chunk_index = p.ChunkIndex,
+                },
             }),
         };
 
@@ -73,10 +87,18 @@ public sealed class VectorStore(IHttpClientFactory httpFactory)
         return parsed?.Result
                    .Select(r => new SearchHit(
                        r.Score,
-                       r.Payload.TryGetValue("text", out var t) ? t.GetString() ?? "" : ""))
+                       PayloadString(r.Payload, "text"),
+                       PayloadString(r.Payload, "filename"),
+                       PayloadInt(r.Payload, "page")))
                    .ToList()
                ?? [];
     }
+
+    private static string PayloadString(Dictionary<string, JsonElement> payload, string key) =>
+        payload.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    private static int PayloadInt(Dictionary<string, JsonElement> payload, string key) =>
+        payload.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
 }
 
 file record SearchResponse(
