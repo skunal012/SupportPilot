@@ -29,10 +29,18 @@ builder.Services.AddHttpClient("qdrant", client =>
 builder.Services.AddSingleton<EmbeddingClient>();
 builder.Services.AddSingleton<VectorStore>();
 
+// DAY 3: the chunker splits documents into ~500-token overlapping pieces.
+// Registered with an instance so its default sizing is used (DI can't fill the
+// int constructor params on its own).
+builder.Services.AddSingleton(new DocumentChunker());
+
 var app = builder.Build();
 
 // DAY 2 demo constants: the collection we store sample doc-vectors in.
 const string DemoCollection = "supportpilot_demo";
+
+// DAY 3: real ingested document chunks live in their own collection.
+const string DocsCollection = "supportpilot_docs";
 
 // The local model that writes the answer. Llama 3.2 3B fits on the GPU (fast).
 // Swapping models later is a one-line change — that's the whole point of the
@@ -168,6 +176,84 @@ app.MapGet("/demo/search", async (string? q, int? k, EmbeddingClient embedder, V
     {
         query = q,
         results = hits.Select(h => new { score = Math.Round(h.Score, 4), text = h.Text }),
+    });
+});
+
+// DAY 3 — INGEST: upload a document, extract its text page-by-page, chunk it,
+// embed each chunk, and store it in Qdrant with metadata (filename, page).
+// This is the pipeline that replaces the hard-coded demo sentences with real docs.
+app.MapPost("/ingest", async (IFormFile file, bool? dryRun,
+    EmbeddingClient embedder, VectorStore store, DocumentChunker chunker, CancellationToken ct) =>
+{
+    if (file is null || file.Length == 0)
+        return Results.BadRequest("Attach a file (form field 'file') — a .pdf, .txt, or .md.");
+
+    // 1. EXTRACT — pull text out, one entry per page (PDFs) or one entry total (text).
+    await using var upload = file.OpenReadStream();
+    var pages = TextExtractor.Extract(upload, file.FileName);
+
+    // 2. CHUNK — split each page into ~500-token overlapping pieces, remembering
+    //    the page each chunk came from so we can cite it later.
+    var chunks = new List<(string Text, int Page, int Index)>();
+    var running = 0;
+    foreach (var page in pages)
+        foreach (var chunkText in chunker.Chunk(page.Text))
+            chunks.Add((chunkText, page.Page, running++));
+
+    if (chunks.Count == 0)
+        return Results.BadRequest("No text could be extracted from that file.");
+
+    // dryRun = see the chunking WITHOUT embedding/storing. Great for inspecting
+    // chunk sizes and the overlap between consecutive chunks.
+    if (dryRun == true)
+        return Results.Ok(new
+        {
+            file = file.FileName,
+            pages = pages.Count,
+            chunks = chunks.Count,
+            preview = chunks.Take(6).Select(c => new
+            {
+                c.Index,
+                c.Page,
+                words = c.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length,
+                text = c.Text,
+            }),
+        });
+
+    // 3. EMBED + STORE — one vector per chunk, tagged with where it came from.
+    await store.EnsureCollectionAsync(DocsCollection, EmbeddingClient.Dimensions, ct);
+    var points = new List<VectorPoint>();
+    foreach (var c in chunks)
+    {
+        var vector = await embedder.EmbedAsync(c.Text, ct);
+        points.Add(new VectorPoint(
+            Id: Guid.NewGuid(), Vector: vector, Text: c.Text,
+            Filename: file.FileName, Page: c.Page, ChunkIndex: c.Index));
+    }
+
+    await store.UpsertAsync(DocsCollection, points, ct);
+    return Results.Ok(new { file = file.FileName, pages = pages.Count, chunks = points.Count, collection = DocsCollection });
+}).DisableAntiforgery();
+
+// DAY 3 — SEARCH over ingested docs: same retrieval as /demo/search, but against
+// real documents — and each result now carries a citation (filename + page).
+app.MapGet("/search", async (string? q, int? k, EmbeddingClient embedder, VectorStore store, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(q))
+        return Results.BadRequest("Pass a query, e.g. /search?q=how+long+do+refunds+take");
+
+    var queryVector = await embedder.EmbedAsync(q, ct);
+    var hits = await store.SearchAsync(DocsCollection, queryVector, limit: k ?? 3, ct);
+
+    return Results.Ok(new
+    {
+        query = q,
+        results = hits.Select(h => new
+        {
+            score = Math.Round(h.Score, 4),
+            source = $"{h.Filename} (p.{h.Page})",
+            text = h.Text,
+        }),
     });
 });
 
