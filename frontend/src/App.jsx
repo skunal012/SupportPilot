@@ -20,11 +20,19 @@ export default function App() {
     const question = input.trim()
     if (!question || isStreaming) return
 
+    // DAY 10 — MEMORY: build the conversation history to send. Take the prior
+    // turns (mapping our {text} shape to the API's {content}) and append the new
+    // user turn. The empty assistant placeholder is added to the UI separately.
+    const history = [
+      ...messages.map((m) => ({ role: m.role, content: m.text })),
+      { role: 'user', content: question },
+    ]
+
     // Push the user's message + an empty assistant message we'll stream into.
     setMessages((prev) => [
       ...prev,
       { role: 'user', text: question },
-      { role: 'assistant', text: '', citations: null },
+      { role: 'assistant', text: '', citations: null, escalation: null },
     ])
     setInput('')
     setIsStreaming(true)
@@ -40,10 +48,11 @@ export default function App() {
         return next
       })
 
-    await streamChat(question, {
+    await streamChat(history, {
       signal: controller.signal,
       onToken: (t) => patchLast((m) => ({ ...m, text: m.text + t })),
       onCitations: (c) => patchLast((m) => ({ ...m, citations: c })),
+      onEscalate: (s) => patchLast((m) => ({ ...m, escalation: s })),
       onError: (msg) =>
         patchLast((m) => ({ ...m, text: (m.text || '') + `\n\n⚠️ ${msg}` })),
       onDone: () => {},
@@ -134,6 +143,8 @@ function Message({ message, streaming }) {
         {streaming && !isUser && <span className="cursor">▋</span>}
       </div>
 
+      {message.escalation && <EscalationCard summary={message.escalation} />}
+
       {message.citations?.length > 0 && (
         <ol className="citations">
           {message.citations.map((c) => (
@@ -148,6 +159,37 @@ function Message({ message, streaming }) {
           ))}
         </ol>
       )}
+    </div>
+  )
+}
+
+// DAY 10 — when the backend escalates (retrieval confidence too low), it sends a
+// structured hand-off summary. This is the view a human support agent would pick
+// up from a queue: what was asked, which team should take it, and how weakly the
+// docs matched.
+function EscalationCard({ summary }) {
+  return (
+    <div className="escalation">
+      <div className="escalation-head">
+        <span className="escalation-badge">Escalated to a human</span>
+        <span className="escalation-team">{summary.suggestedTeam}</span>
+      </div>
+      <dl className="escalation-body">
+        <dt>Question</dt>
+        <dd>{summary.customerQuestion}</dd>
+        <dt>Why</dt>
+        <dd>
+          Low retrieval confidence — best match scored{' '}
+          <strong>{summary.retrieval?.topScore}</strong> (threshold{' '}
+          {summary.retrieval?.threshold}).
+        </dd>
+        {summary.retrieval?.closestSources?.length > 0 && (
+          <>
+            <dt>Closest docs</dt>
+            <dd>{summary.retrieval.closestSources.join(', ')}</dd>
+          </>
+        )}
+      </dl>
     </div>
   )
 }

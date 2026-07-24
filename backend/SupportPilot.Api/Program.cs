@@ -46,6 +46,12 @@ const string DemoCollection = "supportpilot_demo";
 // DAY 3: real ingested document chunks live in their own collection.
 const string DocsCollection = "supportpilot_docs";
 
+// DAY 10 — ESCALATION threshold. If the best-matching chunk's cosine score is
+// below this, we treat the knowledge base as unable to answer and hand off to a
+// human instead of letting the model guess. Calibrated against nomic-embed-text:
+// on-topic questions score ~0.6+, off-topic ones ~0.4 and below.
+const double EscalationThreshold = 0.5;
+
 // The local model that writes the answer. Llama 3.2 3B fits on the GPU (fast).
 // Swapping models later is a one-line change — that's the whole point of the
 // "generation is a swappable adapter" idea.
@@ -79,10 +85,11 @@ IReadOnlyList<OllamaTool> orderTools =
 
 app.MapGet("/", () => "SupportPilot API is running. Try: GET /chat?q=your+question");
 
-// DAY 4 — THE RAG LOOP. The real assistant. Instead of asking the model blind
-// (Day 1, which hallucinated because it has no company knowledge), we RETRIEVE
-// relevant chunks from the ingested docs, GROUND the model in them, stream the
-// answer token-by-token (SSE), and finish with CITATIONS.
+// DAY 4 — THE RAG LOOP, now DAY 10 — MULTI-TURN + ESCALATION.
+// Two entry points share one handler (HandleChat below):
+//   GET  /chat?q=...           single-shot question (backwards-compatible, easy to curl)
+//   POST /chat { messages }    full conversation history, so follow-ups resolve
+// The GET form just wraps the single question as a one-message conversation.
 app.MapGet("/chat", async (string? q, int? k, HttpResponse response,
     EmbeddingClient embedder, VectorStore store, OrdersStore orders,
     IHttpClientFactory httpFactory, CancellationToken ct) =>
@@ -94,87 +101,29 @@ app.MapGet("/chat", async (string? q, int? k, HttpResponse response,
         return;
     }
 
-    response.Headers.ContentType = "text/event-stream";
-    response.Headers.CacheControl = "no-cache";
+    var turns = new List<ChatTurn> { new("user", q) };
+    await HandleChat(turns, k, orderTools, response, embedder, store, orders, httpFactory, ct);
+});
 
-    // 1. RETRIEVE — embed the question, pull the top-K chunks from the docs
-    //    ingested on Day 3. EnsureCollection avoids a 404 if nothing's ingested yet.
-    await store.EnsureCollectionAsync(DocsCollection, EmbeddingClient.Dimensions, ct);
-    var queryVector = await embedder.EmbedAsync(q, ct);
-    var hits = await store.SearchAsync(DocsCollection, queryVector, limit: k ?? 5, ct);
+// DAY 10 — MULTI-TURN. The frontend sends the whole conversation so a follow-up
+// like "what about international?" has the prior turns as context. An LLM has no
+// memory of its own — "memory" is just replaying the conversation into the prompt.
+app.MapPost("/chat", async (ChatRequest req, int? k, HttpResponse response,
+    EmbeddingClient embedder, VectorStore store, OrdersStore orders,
+    IHttpClientFactory httpFactory, CancellationToken ct) =>
+{
+    var turns = req.Messages?
+        .Where(m => m.Role is "user" or "assistant" && !string.IsNullOrWhiteSpace(m.Content))
+        .ToList() ?? [];
 
-    // 2. GROUND — assemble a context block the model must answer from. Numbering
-    //    each chunk lets the model cite it as [1], [2], ...
-    var context = new StringBuilder();
-    for (var i = 0; i < hits.Count; i++)
-        context.AppendLine($"[{i + 1}] (source: {hits[i].Filename} p.{hits[i].Page})\n{hits[i].Text}\n");
-
-    // The grounding rules now cover TWO sources of truth: the retrieved CONTEXT
-    // (policy/product docs) and the get_order TOOL (live order data). The prompt
-    // is careful about WHEN to use the tool because a small model will otherwise
-    // call it for everything (and even invent an order number).
-    var contextBlock = hits.Count > 0 ? context.ToString() : "(no documents were retrieved)";
-
-    // Only OFFER the get_order tool when the question actually looks order-related.
-    // A 3B model will otherwise call it for everything (and invent an order number).
-    // Gating tool availability is a cheap, honest guard — the model still decides
-    // whether to call it; a larger model wouldn't need the gate.
-    var orderRelated = LooksOrderRelated(q);
-
-    var systemPrompt = orderRelated
-        ? // Tool-aware prompt: answer from the CONTEXT and/or a get_order lookup.
-          // NOTE: citations are added by the backend, so we tell the model to write
-          // PLAIN PROSE with no brackets/JSON — otherwise a 3B model tries to "cite"
-          // by emitting a document as a function call, which leaks as garbage text.
-          Persona + "\n" +
-          "Answer customer questions using the CONTEXT below (company policy and product documents) " +
-          "and a single tool named get_order for LIVE order status.\n\n" +
-          "Rules:\n" +
-          "- Call get_order ONLY when the user gives a specific numeric order number (e.g. \"order " +
-          "1042\"). It is the ONLY tool; never invent an order number.\n" +
-          "- If get_order reports the order was not found, tell the user that order number was not " +
-          "found and ask them to double-check it. Never answer an order lookup with \"I don't know " +
-          "based on the available documents.\"\n" +
-          "- Answer policy, shipping, warranty, and product questions from the CONTEXT.\n" +
-          "- Write your answer in plain, natural prose. Do NOT output JSON, function-call syntax, " +
-          "file names, or bracketed citation numbers — just answer the question directly.\n" +
-          "- If the user did not give an order number, do NOT ask for one unless they clearly asked " +
-          "about a specific order.\n" +
-          "- For a non-order question whose answer is not in the context, reply exactly: " +
-          "\"I don't know based on the available documents.\" Do not use outside knowledge.\n\n" +
-          "Context:\n" + contextBlock
-        : // RAG-only prompt (Day 4 behaviour — grounded, reliably cites, no tools).
-          Persona + " Answer the user's question using ONLY the context below. " +
-          "If the answer is not in the context, reply exactly: " +
-          "\"I don't know based on the available documents.\" Do not use any outside knowledge. " +
-          "When you state a fact, cite the source number it came from, like [1].\n\n" +
-          "Context:\n" + contextBlock;
-
-    // 3. GENERATE (agentic) — when the tool is offered, RunToolAwareChat lets the
-    //    model decide whether to call get_order, runs it, feeds the result back,
-    //    and continues. With no tool offered it's a plain one-round grounded answer.
-    var messages = new List<OllamaMessage>
+    if (turns.Count == 0 || turns[^1].Role != "user")
     {
-        new("system", systemPrompt),
-        new("user", q),
-    };
-    await RunToolAwareChat(messages, orderRelated ? orderTools : null, orders, GenerationModel, response, httpFactory, ct);
-
-    // 4. CITATIONS — after the answer, emit the sources as one structured event
-    //    (sentinel-prefixed, same style as [DONE]) so the Day-5 frontend can render
-    //    clickable citations.
-    if (hits.Count > 0)
-    {
-        var citations = hits.Select((h, i) => new
-        {
-            n = i + 1,
-            source = $"{h.Filename} (p.{h.Page})",
-            score = Math.Round(h.Score, 4),
-        });
-        await WriteEvent(response, "[CITATIONS]" + JsonSerializer.Serialize(citations), ct);
+        response.StatusCode = StatusCodes.Status400BadRequest;
+        await response.WriteAsync("Send { messages: [...] } ending with a user turn.", ct);
+        return;
     }
 
-    await WriteEvent(response, "[DONE]", ct);
+    await HandleChat(turns, k, orderTools, response, embedder, store, orders, httpFactory, ct);
 });
 
 // DAY 2 — SEED: embed a handful of sample support sentences and store them in
@@ -317,6 +266,157 @@ static async Task WriteEvent(HttpResponse response, string text, CancellationTok
 {
     await response.WriteAsync($"data: {text}\n\n", ct);
     await response.Body.FlushAsync(ct);
+}
+
+// DAY 10 — the shared chat pipeline used by both GET (single-shot) and POST
+// (multi-turn) /chat. Steps: retrieve for the LATEST user turn, decide whether to
+// escalate, otherwise ground the model in the context + the WHOLE conversation
+// and stream the answer (with the get_order tool when the question looks order-y).
+static async Task HandleChat(
+    IReadOnlyList<ChatTurn> turns, int? k, IReadOnlyList<OllamaTool> orderTools,
+    HttpResponse response, EmbeddingClient embedder, VectorStore store, OrdersStore orders,
+    IHttpClientFactory httpFactory, CancellationToken ct)
+{
+    // The latest user turn drives retrieval (and the order-related check). Earlier
+    // turns are memory: they go to the model but don't re-run retrieval. NOTE:
+    // a bare follow-up ("what about Canada?") retrieves poorly on its own — that's
+    // the Day-16 query-rewriting problem; here memory lets the MODEL interpret it.
+    var lastUser = turns[^1].Content;
+
+    response.Headers.ContentType = "text/event-stream";
+    response.Headers.CacheControl = "no-cache";
+
+    // 1. RETRIEVE — embed the question, pull the top-K chunks from the ingested docs.
+    await store.EnsureCollectionAsync(DocsCollection, EmbeddingClient.Dimensions, ct);
+    var queryVector = await embedder.EmbedAsync(lastUser, ct);
+    var hits = await store.SearchAsync(DocsCollection, queryVector, limit: k ?? 5, ct);
+
+    var orderRelated = LooksOrderRelated(lastUser);
+    var topScore = hits.Count > 0 ? hits[0].Score : 0f;
+
+    // 2. ESCALATE — DAY 10. For a NON-order question where even the best-matching
+    //    chunk is below our confidence threshold, the knowledge base can't answer.
+    //    Rather than let the model guess, hand off to a human with a structured
+    //    summary. (Order questions are answered by the live tool, not the docs, so
+    //    they never escalate on retrieval score.) This is a FAIL-SAFE: when unsure,
+    //    defer to a person instead of hallucinating.
+    if (!orderRelated && topScore < EscalationThreshold)
+    {
+        await EscalateAsync(lastUser, turns, hits, response, ct);
+        await WriteEvent(response, "[DONE]", ct);
+        return;
+    }
+
+    // 3. GROUND — assemble a context block the model must answer from. Numbering
+    //    each chunk lets the model cite it as [1], [2], ...
+    var context = new StringBuilder();
+    for (var i = 0; i < hits.Count; i++)
+        context.AppendLine($"[{i + 1}] (source: {hits[i].Filename} p.{hits[i].Page})\n{hits[i].Text}\n");
+    var contextBlock = hits.Count > 0 ? context.ToString() : "(no documents were retrieved)";
+
+    var systemPrompt = orderRelated
+        ? // Tool-aware prompt: answer from the CONTEXT and/or a get_order lookup.
+          // NOTE: citations are added by the backend, so we tell the model to write
+          // PLAIN PROSE with no brackets/JSON — otherwise a 3B model tries to "cite"
+          // by emitting a document as a function call, which leaks as garbage text.
+          Persona + "\n" +
+          "Answer customer questions using the CONTEXT below (company policy and product documents) " +
+          "and a single tool named get_order for LIVE order status.\n\n" +
+          "Rules:\n" +
+          "- Call get_order ONLY when the user gives a specific numeric order number (e.g. \"order " +
+          "1042\"). It is the ONLY tool; never invent an order number.\n" +
+          "- If get_order reports the order was not found, tell the user that order number was not " +
+          "found and ask them to double-check it. Never answer an order lookup with \"I don't know " +
+          "based on the available documents.\"\n" +
+          "- Answer policy, shipping, warranty, and product questions from the CONTEXT.\n" +
+          "- Write your answer in plain, natural prose. Do NOT output JSON, function-call syntax, " +
+          "file names, or bracketed citation numbers — just answer the question directly.\n" +
+          "- If the user did not give an order number, do NOT ask for one unless they clearly asked " +
+          "about a specific order.\n" +
+          "- For a non-order question whose answer is not in the context, reply exactly: " +
+          "\"I don't know based on the available documents.\" Do not use outside knowledge.\n\n" +
+          "Context:\n" + contextBlock
+        : // RAG-only prompt (Day 4 behaviour — grounded, reliably cites, no tools).
+          Persona + " Answer the user's question using ONLY the context below. " +
+          "If the answer is not in the context, reply exactly: " +
+          "\"I don't know based on the available documents.\" Do not use any outside knowledge. " +
+          "When you state a fact, cite the source number it came from, like [1].\n\n" +
+          "Context:\n" + contextBlock;
+
+    // 4. GENERATE (agentic) — seed the model with the system prompt and then the
+    //    WHOLE conversation (memory), so follow-ups resolve. When the tool is
+    //    offered, RunToolAwareChat lets the model decide whether to call get_order.
+    var messages = new List<OllamaMessage> { new("system", systemPrompt) };
+    foreach (var turn in turns)
+        messages.Add(new OllamaMessage(turn.Role, turn.Content));
+
+    await RunToolAwareChat(messages, orderRelated ? orderTools : null, orders, GenerationModel, response, httpFactory, ct);
+
+    // 5. CITATIONS — after the answer, emit the sources as one structured event
+    //    (sentinel-prefixed, same style as [DONE]) so the frontend can render them.
+    if (hits.Count > 0)
+    {
+        var citations = hits.Select((h, i) => new
+        {
+            n = i + 1,
+            source = $"{h.Filename} (p.{h.Page})",
+            score = Math.Round(h.Score, 4),
+        });
+        await WriteEvent(response, "[CITATIONS]" + JsonSerializer.Serialize(citations), ct);
+    }
+
+    await WriteEvent(response, "[DONE]", ct);
+}
+
+// DAY 10 — ESCALATION. When retrieval confidence is too low to answer safely, we
+// DON'T call the model. We stream a short, honest hand-off message to the customer
+// and emit a structured summary (sentinel [ESCALATE]<json>) that a human agent
+// would pick up from a queue — the customer's question, the recent conversation,
+// what retrieval found (and how weakly), and a suggested team to route it to.
+static async Task EscalateAsync(
+    string question, IReadOnlyList<ChatTurn> turns, IReadOnlyList<SearchHit> hits,
+    HttpResponse response, CancellationToken ct)
+{
+    const string message =
+        "I'm not confident I can answer that accurately from our current help documents, " +
+        "so I've passed this to a member of our support team — they'll follow up with you shortly. " +
+        "If this is about a specific order, share your order number and I can check its status right away.";
+    await WriteEvent(response, message, ct);
+
+    var summary = new
+    {
+        reason = "low_retrieval_confidence",
+        customerQuestion = question,
+        suggestedTeam = SuggestTeam(question),
+        conversation = turns.Select(t => new { role = t.Role, content = t.Content }),
+        retrieval = new
+        {
+            topScore = hits.Count > 0 ? Math.Round(hits[0].Score, 4) : 0,
+            threshold = EscalationThreshold,
+            closestSources = hits.Take(3).Select(h => $"{h.Filename} (p.{h.Page})"),
+        },
+        createdAtUtc = DateTime.UtcNow.ToString("o"),
+    };
+    await WriteEvent(response, "[ESCALATE]" + JsonSerializer.Serialize(summary), ct);
+}
+
+// A tiny keyword router: which human team should pick up this escalation? A real
+// system might use a classifier model (that's Day 18's structured-triage idea),
+// but a cheap heuristic is honest and explainable for the demo.
+static string SuggestTeam(string question)
+{
+    var q = question.ToLowerInvariant();
+    if (q.Contains("refund") || q.Contains("charge") || q.Contains("billing") ||
+        q.Contains("payment") || q.Contains("invoice") || q.Contains("price"))
+        return "Billing";
+    if (q.Contains("ship") || q.Contains("deliver") || q.Contains("track") ||
+        q.Contains("order") || q.Contains("return"))
+        return "Orders & Shipping";
+    if (q.Contains("pair") || q.Contains("connect") || q.Contains("reset") ||
+        q.Contains("firmware") || q.Contains("charge") || q.Contains("broken") ||
+        q.Contains("not working"))
+        return "Technical Support";
+    return "General Support";
 }
 
 // DAY 8-9 — THE AGENTIC LOOP. Give the model a tool and let it decide when to
@@ -507,6 +607,15 @@ static string ExecuteTool(OllamaToolCall call, OrdersStore orders)
 
     return JsonSerializer.Serialize(order);
 }
+
+// DAY 10 — the POST /chat body: the full conversation so far. The frontend sends
+// this so follow-ups have context; the backend replays it into the model prompt.
+record ChatRequest(
+    [property: JsonPropertyName("messages")] IReadOnlyList<ChatTurn>? Messages);
+
+record ChatTurn(
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("content")] string Content);
 
 // --- Request/response shapes for Ollama's /api/chat (records go after top-level code). ---
 
