@@ -2,13 +2,18 @@
 // the browser's point of view everything is same-origin: /chat, /ingest.
 
 /**
- * Ask a question and stream the grounded answer back token-by-token.
+ * Send the conversation so far and stream the grounded answer back token-by-token.
+ *
+ * DAY 10 — MEMORY: we POST the whole message history (not just the latest
+ * question) so follow-ups like "what about international?" resolve. An LLM has no
+ * memory of its own — "memory" is just replaying the conversation into the prompt.
  *
  * The backend replies with Server-Sent Events (Content-Type: text/event-stream).
  * Each frame looks like:
  *     data: <payload>\n\n
- * Most frames are answer tokens. Three are special sentinels:
+ * Most frames are answer tokens. Four are special sentinels:
  *     data: [CITATIONS]<json>   → the sources behind the answer (sent once, at the end)
+ *     data: [ESCALATE]<json>    → DAY 10: retrieval confidence too low; handed to a human
  *     data: [DONE]              → the stream is finished
  *     data: [error] <message>   → the backend hit a problem
  *
@@ -19,13 +24,20 @@
  * So we read the raw byte stream with fetch + a ReadableStream reader and parse
  * the SSE frames ourselves. More code, but we control exactly what happens.
  *
- * Callbacks: onToken(text), onCitations(array), onDone(), onError(message).
+ * `history` is the full conversation as [{ role: 'user'|'assistant', content }],
+ * ending with the new user turn.
+ * Callbacks: onToken(text), onCitations(array), onEscalate(summary), onDone(), onError(message).
  * `signal` is an optional AbortSignal to cancel an in-flight answer.
  */
-export async function streamChat(question, { onToken, onCitations, onDone, onError, signal }) {
+export async function streamChat(history, { onToken, onCitations, onEscalate, onDone, onError, signal }) {
   let response
   try {
-    response = await fetch(`/chat?q=${encodeURIComponent(question)}`, { signal })
+    response = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history }),
+      signal,
+    })
   } catch (err) {
     onError?.(`Could not reach the server: ${err.message}`)
     return
@@ -60,6 +72,11 @@ export async function streamChat(question, { onToken, onCitations, onDone, onErr
         if (payload.startsWith('[CITATIONS]')) {
           try { onCitations?.(JSON.parse(payload.slice('[CITATIONS]'.length))) }
           catch { /* ignore malformed citation json */ }
+          continue
+        }
+        if (payload.startsWith('[ESCALATE]')) {
+          try { onEscalate?.(JSON.parse(payload.slice('[ESCALATE]'.length))) }
+          catch { /* ignore malformed escalation json */ }
           continue
         }
         if (payload.startsWith('[error]')) { onError?.(payload); return }

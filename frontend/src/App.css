@@ -145,10 +145,53 @@
 }
 .composer button.stop { background: #dc2626; }
 
+/* DAY 10 — escalation hand-off card (retrieval confidence too low for the bot) */
+.escalation {
+  margin: 0.5rem 0 0;
+  border: 1px solid #f59e0b;
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: #fffbeb;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.82rem;
+}
+.escalation-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.escalation-badge {
+  font-weight: 700;
+  color: #b45309;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.72rem;
+}
+.escalation-team {
+  margin-left: auto;
+  background: #f59e0b;
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.escalation-body {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 0.6rem;
+}
+.escalation-body dt { color: #92400e; font-weight: 600; }
+.escalation-body dd { margin: 0; color: #4b5563; }
+
 @media (prefers-color-scheme: dark) {
   .transcript { border-color: #374151; }
   .msg.assistant .bubble { background: #1f2937; color: #f3f4f6; }
   .header p, .empty { color: #9ca3af; }
   .composer input { background: #111827; color: #f3f4f6; border-color: #374151; }
   .upload-btn { color: #d1d5db; }
+  .escalation { background: #2a1f0a; border-color: #b45309; }
+  .escalation-body dd { color: #d1d5db; }
 }
