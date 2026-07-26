@@ -1,0 +1,133 @@
+{
+  "description": "SupportPilot evaluation set (v1, Day 11). Each case is a question with a known outcome against the seeded 'Acme Gadgets' docs. expect='answer' cases must be answered from the docs (grounded + cited) and contain the expected keywords. expect='refuse' cases are NOT answerable from the docs, so the only safe behavior is to refuse to fabricate — EITHER escalate to a human OR say 'I don't know based on the available documents'. 'keywords' are facts a correct answer should contain (case-insensitive); 'matchAll' decides whether every keyword or just one is required.",
+  "cases": [
+    {
+      "id": "refund-window",
+      "question": "How many days do I have to return an item for a refund?",
+      "expect": "answer",
+      "keywords": ["30"],
+      "matchAll": true,
+      "source": "acme-support-policy.md"
+    },
+    {
+      "id": "refund-processing-time",
+      "question": "How long do refunds take to process?",
+      "expect": "answer",
+      "keywords": ["5 to 7", "business days"],
+      "matchAll": true,
+      "source": "acme-support-policy.md"
+    },
+    {
+      "id": "opened-earphones-return",
+      "question": "Can I return opened earphones?",
+      "expect": "answer",
+      "keywords": ["cannot", "hygiene", "final sale", "not be returned"],
+      "matchAll": false,
+      "source": "acme-support-policy.md"
+    },
+    {
+      "id": "warranty-length",
+      "question": "How long is the warranty on Acme products?",
+      "expect": "answer",
+      "keywords": ["one-year", "one year", "1 year"],
+      "matchAll": false,
+      "source": "acme-support-policy.md"
+    },
+    {
+      "id": "password-reset",
+      "question": "How do I reset my password?",
+      "expect": "answer",
+      "keywords": ["forgot password", "reset link", "sign-in", "account settings"],
+      "matchAll": false,
+      "source": "acme-support-policy.md"
+    },
+    {
+      "id": "support-hours",
+      "question": "What are your customer support hours?",
+      "expect": "answer",
+      "keywords": ["monday", "friday", "9", "6"],
+      "matchAll": false,
+      "source": "acme-support-policy.md"
+    },
+    {
+      "id": "standard-shipping-time",
+      "question": "How long does standard shipping take?",
+      "expect": "answer",
+      "keywords": ["3 to 5", "business days"],
+      "matchAll": true,
+      "source": "acme-shipping-faq.md"
+    },
+    {
+      "id": "expedited-shipping-cost",
+      "question": "How much does expedited shipping cost?",
+      "expect": "answer",
+      "keywords": ["12"],
+      "matchAll": true,
+      "source": "acme-shipping-faq.md"
+    },
+    {
+      "id": "international-shipping-time",
+      "question": "How long do international orders take to arrive?",
+      "expect": "answer",
+      "keywords": ["7 to 14", "business days"],
+      "matchAll": true,
+      "source": "acme-shipping-faq.md"
+    },
+    {
+      "id": "po-box-shipping",
+      "question": "Do you ship to PO boxes?",
+      "expect": "answer",
+      "keywords": ["standard", "yes", "po box"],
+      "matchAll": false,
+      "source": "acme-shipping-faq.md"
+    },
+    {
+      "id": "soundpods-price",
+      "question": "How much do the SoundPods Pro cost?",
+      "expect": "answer",
+      "keywords": ["129"],
+      "matchAll": true,
+      "source": "acme-product-catalog.md"
+    },
+    {
+      "id": "soundpods-pairing",
+      "question": "How do I pair the SoundPods Pro with my phone?",
+      "expect": "answer",
+      "keywords": ["bluetooth", "pairing", "blink", "case"],
+      "matchAll": false,
+      "source": "acme-soundpods-pro-manual.md"
+    },
+    {
+      "id": "soundpods-next-track",
+      "question": "How do I skip to the next track on the SoundPods Pro?",
+      "expect": "answer",
+      "keywords": ["three times", "right"],
+      "matchAll": true,
+      "source": "acme-soundpods-pro-manual.md"
+    },
+    {
+      "id": "unanswerable-ceo",
+      "question": "Who is the CEO of Acme Gadgets?",
+      "expect": "refuse",
+      "keywords": [],
+      "matchAll": false,
+      "source": null
+    },
+    {
+      "id": "unanswerable-capital",
+      "question": "What is the capital of France?",
+      "expect": "refuse",
+      "keywords": [],
+      "matchAll": false,
+      "source": null
+    },
+    {
+      "id": "unanswerable-laptops",
+      "question": "Do you sell laptops?",
+      "expect": "refuse",
+      "keywords": [],
+      "matchAll": false,
+      "source": null
+    }
+  ]
+}
