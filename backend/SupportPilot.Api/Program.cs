@@ -57,6 +57,12 @@ const double EscalationThreshold = 0.5;
 // "generation is a swappable adapter" idea.
 const string GenerationModel = "llama3.2:3b";
 
+// Grounded factual QA wants faithfulness, not creativity. Pinning temperature to
+// 0 makes generation deterministic — so the eval is reproducible (same input ->
+// same score) and the model sticks to the retrieved context instead of wandering
+// or refusing answerable questions on a bad roll. Day 11 guardrail.
+const double GenerationTemperature = 0.0;
+
 // The base persona. Day 4 assembles the FULL system prompt per request inside
 // /chat by appending the retrieved context and the grounding rules (RAG loop).
 const string Persona =
@@ -458,7 +464,8 @@ static async Task<(string Content, List<OllamaToolCall> ToolCalls)> StreamOneRou
     IReadOnlyList<OllamaMessage> messages, IReadOnlyList<OllamaTool>? tools,
     string model, HttpResponse response, IHttpClientFactory httpFactory, CancellationToken ct)
 {
-    var payload = new OllamaChatRequest(Model: model, Messages: messages, Stream: true, Tools: tools);
+    var payload = new OllamaChatRequest(Model: model, Messages: messages, Stream: true, Tools: tools,
+        Options: new OllamaOptions(GenerationTemperature));
 
     var http = httpFactory.CreateClient("ollama");
     using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
@@ -623,7 +630,12 @@ record OllamaChatRequest(
     [property: JsonPropertyName("model")] string Model,
     [property: JsonPropertyName("messages")] IReadOnlyList<OllamaMessage> Messages,
     [property: JsonPropertyName("stream")] bool Stream,
-    [property: JsonPropertyName("tools"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<OllamaTool>? Tools = null);
+    [property: JsonPropertyName("tools"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<OllamaTool>? Tools = null,
+    [property: JsonPropertyName("options"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] OllamaOptions? Options = null);
+
+// Per-request generation knobs. We only set temperature (0 = deterministic).
+record OllamaOptions(
+    [property: JsonPropertyName("temperature")] double Temperature);
 
 record OllamaMessage(
     [property: JsonPropertyName("role")] string Role,

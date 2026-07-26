@@ -62,6 +62,38 @@ Open http://localhost:5173 and ask away. Sample questions against the seeded
 - *"How much do the SoundPods Pro cost?"* → cites the catalog
 - *"Who is the CEO of Acme Gadgets?"* → *"I don't know based on the available documents."*
 
+## Evaluation
+
+"It works when I try it" isn't evidence. `scripts/eval.ps1` runs a fixed set of
+questions with known answers (`docs/eval/testset.json`) through `/chat` and scores
+two things:
+
+- **Correctness** — does the answer contain the known facts? For questions the
+  docs *can't* answer, "correct" means the system **refuses to fabricate** —
+  either escalating to a human or saying "I don't know."
+- **Groundedness** — an answered question must cite a source; an unanswerable one
+  must refuse. Either way it may not make something up.
+
+```bash
+pwsh ./scripts/eval.ps1        # backend running + docs seeded; writes docs/eval/results.md
+```
+
+Latest run (16 cases, `llama3.2:3b`, generation temperature pinned to **0** for
+reproducible scores — see [docs/eval/results.md](docs/eval/results.md)):
+
+| Metric | Score |
+|---|---|
+| **Correctness** | **15 / 16 (93.8%)** |
+| **Groundedness** | **16 / 16 (100%)** |
+
+All 3 unanswerable questions refuse correctly (no hallucinations). The one miss is
+instructive: *"How long do international orders take to arrive?"* is refused even
+though the fact sits in the **rank-1 retrieved chunk** (score 0.65) — the same fact
+is answered when phrased *"international shipping"*. So the failure is in
+**generation, not retrieval**: the 3B model is brittle to phrasing. That points at
+the planned fixes — query rewriting (Day 16) and/or a larger generation model —
+rather than anything in the retrieval layer.
+
 ## Repository layout
 
 ```
@@ -69,7 +101,9 @@ backend/SupportPilot.Api/   ASP.NET Core API (RAG loop, ingestion, vector store)
 frontend/                   React + Vite chat UI
 sample-docs/                Seed corpus (the fictional "Acme Gadgets" company)
 scripts/seed-docs.ps1       Rebuild the knowledge base from sample-docs/
-docs/revision/              Per-day interview-revision notes (day-01 … day-06-07)
+scripts/eval.ps1            Run the evaluation set and score correctness/groundedness
+docs/eval/                  Evaluation test set (testset.json) + latest results.md
+docs/revision/              Per-day interview-revision notes (day-01 … day-11)
 CLAUDE.md                   Project plan and 3-week roadmap
 ```
 
