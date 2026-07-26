@@ -1,0 +1,7 @@
+# Don't copy local installs or build output into the context; the image runs
+# `npm ci` + `npm run build` fresh inside the build stage.
+node_modules/
+dist/
+.vscode/
+Dockerfile
+.dockerignore

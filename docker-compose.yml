@@ -1,0 +1,56 @@
+# SupportPilot — one-command local stack.
+#
+#   docker compose up --build
+#
+# Brings up three containers: Qdrant (vector DB), the .NET backend, and the
+# nginx-served React frontend. Generation + embeddings still come from OLLAMA
+# RUNNING ON THE HOST (on your GPU) — the backend reaches it via
+# host.docker.internal. So the only prerequisite outside compose is a running
+# Ollama with the two models pulled:
+#
+#   ollama pull llama3.2:3b
+#   ollama pull nomic-embed-text
+#
+# After it's up, seed the docs (the scripts default to localhost:5254, which is
+# mapped to the backend below):
+#
+#   pwsh ./scripts/seed-docs.ps1
+#
+# Then open the app at http://localhost:8080.
+
+services:
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"          # exposed so seed-docs.ps1 can reset the collection
+    volumes:
+      - qdrant_data:/qdrant/storage   # persist the vectors across restarts
+
+  backend:
+    build:
+      context: ./backend/SupportPilot.Api
+    environment:
+      # Inside the compose network Qdrant is reachable by its service name.
+      - Qdrant__BaseUrl=http://qdrant:6333
+      # Ollama runs on the HOST, not in compose — reach it via the gateway alias.
+      - Ollama__BaseUrl=http://host.docker.internal:11434
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux too (it's automatic on
+      # Docker Desktop, harmless to declare).
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Keep the host port at 5254 so seed-docs.ps1 / eval.ps1 work unchanged.
+      - "5254:8080"
+    depends_on:
+      - qdrant
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "8080:80"            # open http://localhost:8080
+    depends_on:
+      - backend
+
+volumes:
+  qdrant_data:
