@@ -1,0 +1,63 @@
+# SupportPilot CI — build the backend, the frontend, and both Docker images on
+# every push and pull request to main. This is the "does it still build?" gate;
+# it does NOT deploy (deploying needs a live LLM + cloud account — see
+# docs/deploy/azure.md). No secrets are required to run this workflow.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend build (.NET)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Restore
+        run: dotnet restore backend/SupportPilot.Api/SupportPilot.Api.csproj
+      - name: Build (Release)
+        run: dotnet build backend/SupportPilot.Api/SupportPilot.Api.csproj -c Release --no-restore
+
+  frontend:
+    name: Frontend build (Vite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Validate the Dockerfiles actually build (no push — just the build).
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/SupportPilot.Api
+          push: false
+          tags: supportpilot-backend:ci
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: supportpilot-frontend:ci

@@ -1,0 +1,9 @@
+# Keep the build context small and reproducible: never copy local build output
+# or IDE/user-secret state into the image (the SDK restores/builds fresh inside).
+bin/
+obj/
+*.user
+.vs/
+.vscode/
+Dockerfile
+.dockerignore

@@ -32,7 +32,26 @@ in the documents.
   ```
 - Node.js (for the frontend)
 
-## Run it
+## Run it with Docker (one command)
+
+The whole app — Qdrant, backend, and the nginx-served frontend — comes up with a
+single command. Generation + embeddings still come from **Ollama on the host**
+(on your GPU), which the backend reaches via `host.docker.internal`, so the only
+prerequisite outside compose is a running Ollama with the two models pulled.
+
+```bash
+ollama serve                       # if it isn't already running as a service
+docker compose up --build          # qdrant + backend(:5254) + frontend(:8080)
+pwsh ./scripts/seed-docs.ps1       # seed the demo knowledge base
+```
+
+Open **http://localhost:8080** and ask away. (Deploying this to Azure Container
+Apps is a separate, account-and-cost decision — see
+[docs/deploy/azure.md](docs/deploy/azure.md).)
+
+## Run it (local dev)
+
+For hot-reload while developing, run the pieces directly instead:
 
 ```bash
 # 1. Vector DB
@@ -97,13 +116,16 @@ rather than anything in the retrieval layer.
 ## Repository layout
 
 ```
-backend/SupportPilot.Api/   ASP.NET Core API (RAG loop, ingestion, vector store)
-frontend/                   React + Vite chat UI
+backend/SupportPilot.Api/   ASP.NET Core API (RAG loop, ingestion, vector store) + Dockerfile
+frontend/                   React + Vite chat UI + Dockerfile + nginx.conf (prod proxy)
+docker-compose.yml          One-command local stack (qdrant + backend + frontend)
+.github/workflows/ci.yml    CI: build backend, frontend, and both Docker images
 sample-docs/                Seed corpus (the fictional "Acme Gadgets" company)
 scripts/seed-docs.ps1       Rebuild the knowledge base from sample-docs/
 scripts/eval.ps1            Run the evaluation set and score correctness/groundedness
 docs/eval/                  Evaluation test set (testset.json) + latest results.md
-docs/revision/              Per-day interview-revision notes (day-01 … day-11)
+docs/deploy/azure.md        Azure Container Apps deploy runbook
+docs/revision/              Per-day interview-revision notes (day-01 … day-12)
 CLAUDE.md                   Project plan and 3-week roadmap
 ```
 
