@@ -30,16 +30,29 @@ That combination — retrieve real knowledge + take real actions + escalate when
 
 ## 3. Tech Stack
 
-| Layer | Choice | Notes |
-|---|---|---|
-| Backend | ASP.NET Core (C#) | Existing skill |
-| LLM Framework | **Semantic Kernel** | Microsoft's official LLM framework for .NET — the honest LangChain equivalent for this stack |
-| LLM Provider | OpenAI API **or** Azure OpenAI | Azure OpenAI = stronger signal for .NET/Azure employers, more setup friction. Decide before Day 1. |
-| Vector DB | Qdrant (Docker) or Postgres + pgvector | Qdrant is easiest to start |
-| Frontend | React.js | Existing skill; new part is consuming SSE streams |
-| Deployment | Docker + Azure Container Apps + GitHub Actions | Existing skills |
+> **What was actually built.** The table below is the *plan as written on Day 0*.
+> Two choices changed during the build, and the "as built" column is what the
+> resume and README must reflect.
 
-> **Honesty rule:** Only list on the resume what is actually used in this project. Use Semantic Kernel, not LangChain (LangChain is Python/JS-first).
+| Layer | Planned | **As built** |
+|---|---|---|
+| Backend | ASP.NET Core (C#) | ASP.NET Core (.NET 10) minimal API |
+| LLM Framework | Semantic Kernel | **None** — Ollama's HTTP API directly, via raw `HttpClient` |
+| LLM Provider | OpenAI API **or** Azure OpenAI | **Ollama, local** (`llama3.2:3b` + `nomic-embed-text`) |
+| Vector DB | Qdrant (Docker) or Postgres + pgvector | Qdrant (Docker) |
+| Frontend | React.js | React + Vite, hand-parsed SSE |
+| Deployment | Docker + Azure Container Apps + GitHub Actions | Docker + Compose + GitHub Actions **CI**; Azure documented, not deployed |
+
+**Why the deviation, and why it's defensible:** the backend has exactly one NuGet
+dependency (PdfPig). Embeddings, streaming, vector search, and the function-calling
+loop are implemented directly — which means the tool loop (schema → model decision
+→ execute → inject result → re-prompt) is understood rather than delegated. Cost is
+two ATS keywords ("Semantic Kernel", "Azure OpenAI"); the gain is being able to
+explain every mechanism cold. Running fully local also made the project free.
+
+> **Honesty rule:** Only list on the resume what is actually used in this project.
+> That rule is why "Semantic Kernel" and "Azure OpenAI" do **not** appear in the
+> resume output below, despite being in the original plan.
 
 ---
 
@@ -115,24 +128,29 @@ That combination — retrieve real knowledge + take real actions + escalate when
 
 **Skills line:**
 
-> AI & LLM: GitHub Copilot · OpenAI API / Azure OpenAI · Semantic Kernel · RAG · Embeddings & Vector Search (Qdrant) · LLM Function Calling
+> AI & LLM: GitHub Copilot · Ollama (local LLM inference) · RAG · Embeddings & Vector Search (Qdrant) · LLM Function Calling / Tool Use · SSE Streaming
 
 **Project bullets:**
 
-- Built an AI customer-support assistant (ASP.NET Core, React, Semantic Kernel) using RAG over company documents, with source citations and streaming responses.
+- Built an AI customer-support assistant (ASP.NET Core, React, local Ollama models) using RAG over company documents, with source citations and token-by-token streaming over SSE — no LLM framework, one NuGet dependency.
 - Implemented LLM function calling to fetch live order data, with automatic human-escalation summaries for low-confidence queries.
 - Designed a chunking/embedding ingestion pipeline (Qdrant) and improved retrieval accuracy with hybrid (vector + keyword) search, re-ranking, and LLM-based query rewriting for multi-turn conversations.
 - Built an analytics dashboard tracking answer rates, escalations, and content gaps; instrumented per-query token cost and an automated evaluation pipeline (30-case test suite with LLM-as-judge scoring).
-- Containerized and deployed to Azure Container Apps with GitHub Actions CI/CD.
+- Containerized the full stack (Qdrant, .NET API, nginx/React) with Docker Compose and GitHub Actions CI; documented an Azure Container Apps deployment path constrained by local-GPU model hosting.
 
 ---
 
-## Open Decision (make before Day 1)
+## Open Decision (made before Day 1) — **RESOLVED: neither; local Ollama**
 
-**OpenAI API direct vs. Azure OpenAI:**
+The original choice was OpenAI direct (simpler, ~$5) vs. Azure OpenAI (stronger
+.NET/Azure resume signal, more setup friction). **Both were rejected in favour of
+Ollama running locally**, which made the project free to build and iterate on with
+no API keys or billing, and forced every LLM mechanism to be implemented by hand.
 
-- **OpenAI direct** — simpler signup, pay-as-you-go (~$5 covers the whole project).
-- **Azure OpenAI** — requires an Azure subscription + model deployment setup, but stronger resume signal for .NET/Azure-stack employers. With 3 weeks, there is slack to absorb the setup friction — recommended if targeting Microsoft-stack roles.
+The trade-off is now a known, answerable interview question rather than a gap:
+*"why not Azure OpenAI?"* → cost and iteration speed during learning; the provider
+call sites are small enough to swap, which is exactly what a live Azure deployment
+would require (see `docs/deploy/azure.md`).
 
 ## Interview Prep Cheat-Sheet (know cold by Day 21)
 

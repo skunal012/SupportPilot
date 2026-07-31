@@ -1,14 +1,91 @@
 # SupportPilot
 
-An AI customer-support assistant that answers questions over a company's own
-documents using **RAG** (Retrieval-Augmented Generation): it retrieves relevant
-chunks from ingested docs, grounds a local LLM in them, streams the answer
-token-by-token, and cites its sources — refusing to guess when the answer isn't
-in the documents.
+**An AI customer-support assistant that answers from a company's own documents —
+with citations, live order lookups, and a refusal to guess.**
 
-> Runs **fully local and free** — no API keys, no billing. Generation and
-> embeddings both come from a local [Ollama](https://ollama.com) server; the
-> vector store is [Qdrant](https://qdrant.tech) in Docker.
+Ask it a policy question and it retrieves the relevant chunks from the ingested
+docs, grounds a local LLM in them, and streams the answer token-by-token with
+clickable sources. Ask it about an order and it calls a live API. Ask it
+something the documents don't cover and it hands off to a human instead of
+making something up.
+
+Runs **fully local and free** — no API keys, no billing. Generation and
+embeddings come from [Ollama](https://ollama.com); the vector store is
+[Qdrant](https://qdrant.tech) in Docker.
+
+![SupportPilot demo — a grounded answer with citations, a live order lookup, and an escalation to a human](docs/demo.gif)
+
+## What you're seeing
+
+1. **"How long do refunds take?"** — the answer streams in and cites the exact
+   source document and page. Clicking `[1]` highlights the chunk it came from,
+   with its retrieval score.
+2. **"Where is order 1042?"** — no document contains this. The model decides to
+   call the `get_order` tool, the backend executes it, feeds the result back, and
+   the model answers from live data.
+3. **A question the docs can't answer** — rather than guess, the system escalates:
+   a structured handoff summary routed to the right human team.
+
+## How it works
+
+```mermaid
+flowchart LR
+  Q["Question<br/>+ history"] --> E["Embed<br/>nomic-embed-text"]
+  E --> R[("Qdrant<br/>top-k chunks")]
+  R --> C{"Retrieval<br/>confident?"}
+  C -- no --> ESC["Escalate:<br/>structured handoff"]
+  C -- yes --> P["Grounded prompt<br/>+ conversation history"]
+  P --> L["llama3.2:3b"]
+  L --> T{"Model emits<br/>get_order?"}
+  T -- yes --> O["Execute tool,<br/>inject result"] --> L
+  T -- no --> A["Stream answer<br/>+ citations"]
+```
+
+"Confident?" is a threshold on the top chunk's cosine score (0.5). Below it, the
+knowledge base can't answer, so guessing is the wrong behaviour — the request
+becomes a human handoff instead.
+
+One simplification the diagram leaves out: the `get_order` tool is only *offered*
+to the model when a cheap keyword check thinks the question concerns an order. A
+3B model handed a tool on every turn will try to call it on refund-policy
+questions too. A larger model wouldn't need the guard.
+
+## Built without an LLM framework
+
+The backend has **one NuGet dependency** — PdfPig, for extracting text from PDFs.
+Embeddings, SSE streaming, vector search, and the function-calling loop are
+implemented directly against Ollama's HTTP API.
+
+That was the point. The tool loop — *describe the function as JSON Schema → the
+model emits a call → you execute it → you inject the result → you re-prompt* — is
+the thing worth understanding, and a framework hides it behind one method call.
+
+## Does it actually work?
+
+"It works when I try it" isn't evidence. `scripts/eval.ps1` runs a fixed set of
+questions with known answers (`docs/eval/testset.json`) through `/chat` and scores:
+
+- **Correctness** — does the answer contain the known facts? For questions the
+  docs *can't* answer, "correct" means the system **refuses to fabricate** —
+  either escalating to a human or saying "I don't know."
+- **Groundedness** — an answered question must cite a source; an unanswerable one
+  must refuse. Either way it may not make something up.
+
+Latest run (16 cases, `llama3.2:3b`, generation temperature pinned to **0** for
+reproducible scores — full table in [docs/eval/results.md](docs/eval/results.md)):
+
+| Metric | Score |
+|---|---|
+| **Correctness** | **15 / 16 (93.8%)** |
+| **Groundedness** | **16 / 16 (100%)** |
+
+All 3 unanswerable questions refuse correctly (no hallucinations). The one miss is
+instructive: *"How long do international orders take to arrive?"* is refused even
+though the fact sits in the **rank-1 retrieved chunk** (score 0.65) — the same fact
+is answered when phrased *"international shipping"*. So the failure is in
+**generation, not retrieval**: the 3B model is brittle to phrasing. That points at
+the planned fixes — query rewriting (Day 16) and/or a larger generation model —
+rather than anything in the retrieval layer.
 
 ## Stack
 
@@ -45,9 +122,7 @@ docker compose up --build          # qdrant + backend(:5254) + frontend(:8080)
 pwsh ./scripts/seed-docs.ps1       # seed the demo knowledge base
 ```
 
-Open **http://localhost:8080** and ask away. (Deploying this to Azure Container
-Apps is a separate, account-and-cost decision — see
-[docs/deploy/azure.md](docs/deploy/azure.md).)
+Open **http://localhost:8080** and ask away.
 
 ## Run it (local dev)
 
@@ -83,35 +158,9 @@ Open http://localhost:5173 and ask away. Sample questions against the seeded
 
 ## Evaluation
 
-"It works when I try it" isn't evidence. `scripts/eval.ps1` runs a fixed set of
-questions with known answers (`docs/eval/testset.json`) through `/chat` and scores
-two things:
-
-- **Correctness** — does the answer contain the known facts? For questions the
-  docs *can't* answer, "correct" means the system **refuses to fabricate** —
-  either escalating to a human or saying "I don't know."
-- **Groundedness** — an answered question must cite a source; an unanswerable one
-  must refuse. Either way it may not make something up.
-
 ```bash
 pwsh ./scripts/eval.ps1        # backend running + docs seeded; writes docs/eval/results.md
 ```
-
-Latest run (16 cases, `llama3.2:3b`, generation temperature pinned to **0** for
-reproducible scores — see [docs/eval/results.md](docs/eval/results.md)):
-
-| Metric | Score |
-|---|---|
-| **Correctness** | **15 / 16 (93.8%)** |
-| **Groundedness** | **16 / 16 (100%)** |
-
-All 3 unanswerable questions refuse correctly (no hallucinations). The one miss is
-instructive: *"How long do international orders take to arrive?"* is refused even
-though the fact sits in the **rank-1 retrieved chunk** (score 0.65) — the same fact
-is answered when phrased *"international shipping"*. So the failure is in
-**generation, not retrieval**: the 3B model is brittle to phrasing. That points at
-the planned fixes — query rewriting (Day 16) and/or a larger generation model —
-rather than anything in the retrieval layer.
 
 ## Repository layout
 
@@ -125,7 +174,7 @@ scripts/seed-docs.ps1       Rebuild the knowledge base from sample-docs/
 scripts/eval.ps1            Run the evaluation set and score correctness/groundedness
 docs/eval/                  Evaluation test set (testset.json) + latest results.md
 docs/deploy/azure.md        Azure Container Apps deploy runbook
-docs/revision/              Per-day interview-revision notes (day-01 … day-12)
+docs/revision/              Per-day interview-revision notes (day-01 … day-14)
 CLAUDE.md                   Project plan and 3-week roadmap
 ```
 
@@ -134,8 +183,10 @@ CLAUDE.md                   Project plan and 3-week roadmap
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/chat?q=…` | RAG answer, streamed as SSE, with citations |
+| `POST` | `/chat` | Same, but takes the full conversation history (multi-turn) |
 | `POST` | `/ingest` | Upload a `.pdf/.txt/.md` → extract, chunk, embed, store |
 | `GET` | `/search?q=…` | Raw retrieval results (debug view of the "retrieve" half) |
+| `GET` | `/orders/{id}` | Mock Orders API — the live data the `get_order` tool reads |
 
 ---
 

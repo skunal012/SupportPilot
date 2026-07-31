@@ -1,16 +1,37 @@
-# React + Vite
+# SupportPilot — frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + Vite chat UI for [SupportPilot](../README.md). Three things here are worth
+knowing about:
 
-Currently, two official plugins are available:
+- **SSE streaming, parsed by hand.** `src/api.js` reads the backend's
+  `text/event-stream` with `fetch` + a `ReadableStream` reader rather than the
+  browser's `EventSource` — `EventSource` auto-reconnects when the server closes
+  the stream, which would silently re-fire the whole question after `[DONE]`, and
+  it gives no cancel handle. Tokens patch the last message as they arrive.
+- **Citations.** After the answer, the backend emits its sources as a
+  sentinel-prefixed frame (`[CITATIONS]<json>`). `[n]` markers in the text are
+  clickable and highlight the matching source, with its filename, page, and
+  retrieval score.
+- **Escalation cards.** When retrieval confidence is too low, the backend sends
+  `[ESCALATE]<json>` — a structured handoff summary — instead of an answer, and
+  it renders as a card with the suggested team.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Develop
 
-## React Compiler
+```bash
+npm install
+npm run dev        # http://localhost:5173
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The backend must be running on `:5254` (see the [root README](../README.md)).
+Vite proxies `/chat`, `/ingest`, and `/search` to it, so from the browser's point
+of view everything is same-origin and there's no CORS to configure.
 
-## Expanding the Oxlint configuration
+## Build
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```bash
+npm run build      # -> dist/
+```
+
+In production the built assets are served by nginx, which also reverse-proxies
+the API — see `Dockerfile` and `nginx.conf`.
