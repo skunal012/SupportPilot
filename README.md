@@ -20,11 +20,14 @@ embeddings come from [Ollama](https://ollama.com); the vector store is
 1. **"How long do refunds take?"** — the answer streams in and cites the exact
    source document and page. Clicking `[1]` highlights the chunk it came from,
    with its retrieval score.
-2. **"Where is order 1042?"** — no document contains this. The model decides to
-   call the `get_order` tool, the backend executes it, feeds the result back, and
-   the model answers from live data.
-3. **A question the docs can't answer** — rather than guess, the system escalates:
-   a structured handoff summary routed to the right human team.
+2. **"Where is order 1042?"** — the ship date and tracking number aren't in any
+   document. The model calls the `get_order` tool, the backend executes it and
+   feeds the result back, and the answer combines that live data with the docs'
+   guidance on how to track a package.
+3. **"Can I set up a monthly payment plan?"** — the documents don't cover this.
+   Rather than guess, the system escalates: a structured handoff summary showing
+   the retrieval score that triggered it (0.44, under the 0.5 threshold), routed
+   to the Billing team.
 
 ## How it works
 
