@@ -13,9 +13,10 @@ Runs **fully local and free** — no API keys, no billing. Generation and
 embeddings come from [Ollama](https://ollama.com); the vector store is
 [Qdrant](https://qdrant.tech) in Docker.
 
-![SupportPilot demo — a grounded answer with citations, a live order lookup, and an escalation to a human](docs/demo.gif)
+## Three questions, three behaviours
 
-## What you're seeing
+Every question takes one of three paths through the system. These are the actual
+responses, reproducible against the seeded knowledge base:
 
 1. **"How long do refunds take?"** — the answer streams in and cites the exact
    source document and page. Clicking `[1]` highlights the chunk it came from,
